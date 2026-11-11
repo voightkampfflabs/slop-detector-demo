@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Slop detector</title>
+    <meta
+      name="description"
+      content="Scores how much of a text was written by an LLM. The model runs in your browser."
+    />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-row">
+        <h1>Slop detector</h1>
+        <a class="model" href="https://huggingface.co/VoightKampffLabs/voi-slop-detect-380M">
+          voi-slop-detect-380M
+        </a>
+        <p class="status" id="status" role="status">starting</p>
+      </div>
+      <div
+        class="load"
+        id="load"
+        role="progressbar"
+        aria-label="Model download"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+      >
+        <div class="load-fill" id="load-fill"></div>
+      </div>
+    </header>
+
+    <main>
+      <textarea
+        id="text"
+        disabled
+        spellcheck="false"
+        autocomplete="off"
+        aria-label="Text to score"
+        placeholder="The model is loading. It is 441 MB, downloaded once and kept by your browser."
+      ></textarea>
+    </main>
+
+    <footer class="gauge" id="gauge" data-state="idle">
+      <div class="readout">
+        <output class="score" id="score" for="text">&ndash;</output>
+        <span class="verdict" id="verdict"></span>
+      </div>
+      <div class="scale">
+        <div class="ruler" id="ruler" aria-hidden="true">
+          <div class="fill" id="fill"></div>
+          <div class="marker" id="marker"></div>
+        </div>
+        <p class="fine" id="fine">0 is untouched human writing, 1 is text a model wrote from scratch.</p>
+      </div>
+      <dl class="stats">
+        <div class="stat">
+          <dt>Tokens</dt>
+          <dd id="stat-tokens">&ndash;</dd>
+        </div>
+        <div class="stat">
+          <dt>Inference</dt>
+          <dd id="stat-latency">&ndash;</dd>
+        </div>
+      </dl>
+    </footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

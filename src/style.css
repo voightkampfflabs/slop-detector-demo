@@ -1,0 +1,402 @@
+:root {
+  color-scheme: light;
+
+  --paper: #eee9dc;
+  --field: #fffdf8;
+  --ink: #1c1a16;
+  --muted: #6b6558;
+  --rule: #c9c1ae;
+  --field-border: #a59c86;
+  --accent: #c63a17;
+
+  --serif: 'Source Serif 4 Variable', Charter, Georgia, serif;
+  --sans: 'Source Sans 3 Variable', 'Helvetica Neue', Arial, sans-serif;
+
+  --gutter: clamp(1rem, 4vw, 3.5rem);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100dvh;
+  /* The page is one fixed screen; only the text field scrolls. */
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* Masthead: title, model name, status, and a rule that doubles as the loading bar. */
+
+.masthead-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1.1rem;
+  padding: 1.2rem var(--gutter) 0.75rem;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.model,
+.status,
+.fine,
+.band,
+.tick-label,
+.stat dt {
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.model {
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+.model:hover,
+.model:focus-visible {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+  outline: none;
+}
+
+.status {
+  margin: 0 0 0 auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.status[data-error] {
+  color: var(--accent);
+}
+
+.load {
+  position: relative;
+  height: 1px;
+  background: var(--rule);
+}
+
+.load-fill {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 3px;
+  background: var(--ink);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition:
+    transform 120ms linear,
+    opacity 600ms var(--ease) 300ms;
+}
+
+.load[data-done] .load-fill {
+  opacity: 0;
+}
+
+/* The text field: a plain bordered sheet across the full width. */
+
+main {
+  min-height: 0;
+  padding: 1.25rem var(--gutter);
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 1.1rem 1.3rem;
+  border: 1px solid var(--field-border);
+  border-radius: 2px;
+  outline: 0;
+  resize: none;
+  background: var(--field);
+  color: var(--ink);
+  caret-color: var(--accent);
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  line-height: 1.6;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+  transition:
+    border-color 150ms var(--ease),
+    box-shadow 150ms var(--ease);
+}
+
+textarea:focus {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 1px var(--ink);
+}
+
+textarea::placeholder {
+  color: var(--muted);
+  font-style: italic;
+  opacity: 1;
+}
+
+textarea:disabled {
+  background: transparent;
+  border-style: dashed;
+  cursor: progress;
+}
+
+/* The gauge: score, ruler, stats. */
+
+.gauge {
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr) auto;
+  column-gap: 2rem;
+  align-items: start;
+  padding: 1rem var(--gutter) 1rem;
+  border-top: 1px solid var(--ink);
+}
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.score {
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 3rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 200ms var(--ease);
+}
+
+.verdict {
+  min-height: 1.4em;
+  font-size: 1.15rem;
+  font-style: italic;
+  transition: opacity 200ms var(--ease);
+}
+
+.gauge[data-state='idle'] .score,
+.gauge[data-state='short'] .score {
+  color: var(--muted);
+}
+
+.gauge[data-busy] .score,
+.gauge[data-busy] .verdict {
+  opacity: 0.4;
+}
+
+/* Ruler: ticks hang from a baseline, the fill and marker sit on it. */
+
+.ruler {
+  position: relative;
+  height: 3.8rem;
+  margin-top: 0.2rem;
+}
+
+.ruler::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 1.4rem;
+  height: 1px;
+  background: var(--ink);
+}
+
+.tick {
+  position: absolute;
+  top: 1.4rem;
+  width: 1px;
+  height: 0.3rem;
+  background: var(--ink);
+}
+
+.tick[data-major] {
+  height: 0.55rem;
+}
+
+.tick-label {
+  position: absolute;
+  top: -0.1rem;
+  transform: translateX(-50%);
+  font-variant-numeric: tabular-nums;
+}
+
+.tick-label[data-edge='start'] {
+  transform: none;
+}
+
+.tick-label[data-edge='end'] {
+  transform: translateX(-100%);
+}
+
+.cut {
+  position: absolute;
+  top: 1.4rem;
+  width: 1px;
+  height: 2.3rem;
+  background: var(--ink);
+}
+
+.cut[data-kind='flag'] {
+  top: 0.7rem;
+  height: 0.7rem;
+  background: none;
+  border-left: 1px dashed var(--muted);
+}
+
+.band {
+  position: absolute;
+  top: 2.35rem;
+  padding-left: 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: color 200ms var(--ease);
+}
+
+.band[data-active] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.fill {
+  position: absolute;
+  left: 0;
+  top: calc(1.4rem - 4px);
+  width: 100%;
+  height: 4px;
+  background: var(--accent);
+  transform: scaleX(var(--score, 0));
+  transform-origin: left;
+  transition: transform 450ms var(--ease);
+}
+
+.marker {
+  position: absolute;
+  top: 0.45rem;
+  /* Positioned with left, not a transform on a full-width box: that box would
+     stick out past the ruler by the score's share of its width and make the
+     page scroll. */
+  left: calc(var(--score, 0) * 100%);
+  width: 0;
+  height: 0.95rem;
+  pointer-events: none;
+  transition:
+    left 450ms var(--ease),
+    opacity 200ms var(--ease);
+}
+
+.marker::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--accent);
+}
+
+.gauge:not([data-state='scored']) .marker {
+  opacity: 0;
+}
+
+.fine {
+  margin: 0.15rem 0 0;
+  min-height: 1.5em;
+  line-height: 1.5;
+}
+
+/* Stats: tokens in the text and how long the model took. */
+
+.stats {
+  display: flex;
+  gap: 1.75rem;
+  margin: 0;
+  padding-left: 2rem;
+  border-left: 1px solid var(--rule);
+  align-self: stretch;
+}
+
+.stat dt {
+  margin-bottom: 0.3rem;
+}
+
+.stat dd {
+  margin: 0;
+  min-width: 4.5rem;
+  font-family: var(--sans);
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stat dd small {
+  font-size: 0.85rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+@media (max-width: 60rem) {
+  .gauge {
+    grid-template-columns: 9rem minmax(0, 1fr);
+    row-gap: 0.75rem;
+  }
+
+  .scale {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .stats {
+    justify-self: end;
+    border-left: 0;
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 36rem) {
+  .model {
+    display: none;
+  }
+
+  .score {
+    font-size: 2.4rem;
+  }
+
+  .stat dd {
+    font-size: 1.2rem;
+    min-width: 3.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0ms !important;
+  }
+}
