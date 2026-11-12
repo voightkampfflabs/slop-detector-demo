@@ -73,13 +73,14 @@ let bands: Bands | null = null;
 
 function drawBands(b: Bands): void {
   bands = b;
-  place('cut', b.human_max);
+  place('cut', b.flag_min);
   place('cut', b.generated_min);
-  place('cut', b.flag_min, { 'data-kind': 'flag' });
 
+  // Human ends at the flag cut, not at human_max: human_max is where the
+  // training target's human band ends, and many human texts score above it.
   const spans: Array<[string, number, number]> = [
-    ['human', 0, b.human_max],
-    ['AI-edited', b.human_max, b.generated_min],
+    ['human', 0, b.flag_min],
+    ['AI-edited', b.flag_min, b.generated_min],
     ['AI-generated', b.generated_min, 1],
   ];
   bandList = spans.map(([name, from, to]) => {
@@ -167,7 +168,7 @@ function renderResult(result: ScoreResult): void {
     notes.push(
       score >= bands.flag_min
         ? `At or above ${bands.flag_min.toFixed(2)}: flagged as not human.`
-        : `Below ${bands.flag_min.toFixed(2)}: not flagged.`,
+        : `Below ${bands.flag_min.toFixed(2)}, the cut 1% of human texts reach: not flagged.`,
     );
   }
   if (tokens > maxTokens) notes.push(`Only the first ${maxTokens} tokens were scored.`);

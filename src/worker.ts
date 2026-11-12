@@ -8,6 +8,7 @@ import { Tokenizer } from '@huggingface/tokenizers';
 import ortLoaderUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url';
 import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
 import type { Bands, FromWorker, ToWorker } from './protocol';
+import { modelInput } from './text';
 
 const REPO = 'https://huggingface.co/VoightKampffLabs/voi-slop-detect-380M/resolve/main';
 const MODEL_URL = `${REPO}/onnx/model_quantized.onnx`;
@@ -100,11 +101,6 @@ async function loadModelBytes(): Promise<Uint8Array> {
   return bytes;
 }
 
-/** The model was trained with fenced code blocks emptied to a bare ``` pair. */
-function emptyCodeBlocks(text: string): string {
-  return text.replace(/```[^\n]*\n[\s\S]*?```/g, '```\n```');
-}
-
 function halfToNumber(half: number): number {
   const sign = half & 0x8000 ? -1 : 1;
   const exponent = (half >> 10) & 0x1f;
@@ -123,7 +119,7 @@ function firstValue(tensor: ort.Tensor): number {
 }
 
 async function score(id: number, text: string): Promise<void> {
-  const all = tokenizer.encode(emptyCodeBlocks(text)).ids;
+  const all = tokenizer.encode(modelInput(text)).ids;
   const tokens = all.length - specialTokens;
   const limits = { minTokens: MIN_TOKENS, maxTokens: MAX_TOKENS - specialTokens };
 

@@ -262,13 +262,6 @@ textarea:disabled {
   background: var(--ink);
 }
 
-.cut[data-kind='flag'] {
-  top: 0.7rem;
-  height: 0.7rem;
-  background: none;
-  border-left: 1px dashed var(--muted);
-}
-
 .band {
   position: absolute;
   top: 2.35rem;

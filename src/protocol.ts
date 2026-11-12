@@ -1,9 +1,9 @@
 /** Messages between the page (main.ts) and the inference worker (worker.ts). */
 
 export interface Bands {
-  /** Below this the text counts as human. */
+  /** Where the training target's human band ends. Not shown: human texts often score above it. */
   human_max: number;
-  /** At or above this, flag the text as not human (1% false positives). */
+  /** At or above this, flag the text as not human (1% false positives). The page's human edge. */
   flag_min: number;
   /** At or above this the text counts as AI-generated. */
   generated_min: number;
