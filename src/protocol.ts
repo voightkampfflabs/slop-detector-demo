@@ -23,9 +23,12 @@ export interface ScoreResult {
 
 export type ToWorker = { type: 'score'; id: number; text: string };
 
+/** Where the model runs: the GPU through WebGPU, or the CPU through WebAssembly. */
+export type Backend = 'webgpu' | 'wasm';
+
 export type FromWorker =
   | { type: 'progress'; loaded: number; total: number; cached: boolean }
   | { type: 'compiling' }
-  | { type: 'ready'; bands: Bands; threads: number }
+  | { type: 'ready'; bands: Bands; backend: Backend; threads: number }
   | { type: 'result'; id: number; result: ScoreResult }
   | { type: 'error'; message: string };

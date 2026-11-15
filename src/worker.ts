@@ -1,23 +1,28 @@
 /// <reference lib="webworker" />
-import * as ort from 'onnxruntime-web/wasm';
+import type * as Ort from 'onnxruntime-web';
 import { Tokenizer } from '@huggingface/tokenizers';
-// ONNX Runtime's own loader and binary, emitted as separate files. Its thread
+// ONNX Runtime's own loaders and binaries, emitted as separate files. Its thread
 // workers must start from the loader, not from this bundled script: if they
 // load this file they run init() again and replace the runtime's message
-// handler, and session creation never returns.
-import ortLoaderUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url';
-import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
-import type { Bands, FromWorker, ToWorker } from './protocol';
+// handler, and session creation never returns. The WebGPU build of the runtime
+// has its own pair (asyncify); the plain pair is half the size and CPU only.
+import wasmLoaderUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url';
+import wasmBinaryUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
+import gpuLoaderUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.mjs?url';
+import gpuBinaryUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url';
+import type { Backend, Bands, FromWorker, ToWorker } from './protocol';
 import { modelInput } from './text';
 
 const REPO = 'https://huggingface.co/VoightKampffLabs/voi-slop-detect-380M/resolve/main';
 const MODEL_URL = `${REPO}/onnx/model_quantized.onnx`;
 /** Size of model_quantized.onnx, used when the response carries no Content-Length. */
-const MODEL_BYTES = 440_745_440;
+const MODEL_BYTES = 450_063_595;
 const MAX_TOKENS = 512;
 /** Shorter texts are outside what the model was trained on and are not scored. */
 const MIN_TOKENS = 30;
-const CACHE_NAME = 'voi-slop-detect-380M-q8';
+/** Named after the export: the opset 18 graph of the old cache is wrong on WebGPU. */
+const CACHE_NAME = 'voi-slop-detect-380M-q8-opset23';
+const OLD_CACHES = ['voi-slop-detect-380M-q8'];
 
 const post = (message: FromWorker) => self.postMessage(message);
 
@@ -28,7 +33,9 @@ function log(...args: unknown[]): void {
 }
 
 let tokenizer: Tokenizer;
-let session: ort.InferenceSession;
+/** The runtime build of the backend in use; the two builds are loaded on demand. */
+let ort: typeof Ort;
+let session: Ort.InferenceSession;
 /** How many special tokens the tokenizer adds to every text. */
 let specialTokens = 0;
 
@@ -72,6 +79,7 @@ async function readWithProgress(response: Response, cached: boolean): Promise<Ui
 async function loadModelBytes(): Promise<Uint8Array> {
   // The Cache API can be missing or throw (private windows, blocked storage).
   const cache = await caches.open(CACHE_NAME).catch(() => null);
+  for (const name of OLD_CACHES) void caches.delete(name).catch(() => false);
 
   log('cache storage', cache ? 'available' : 'unavailable');
 
@@ -111,11 +119,75 @@ function halfToNumber(half: number): number {
 }
 
 /** First value of a float tensor. The q8 graph may emit float16 logits. */
-function firstValue(tensor: ort.Tensor): number {
+function firstValue(tensor: Ort.Tensor): number {
   const data = tensor.data as ArrayLike<number | bigint>;
   // Older runtimes hand float16 back as raw bits in a Uint16Array.
   if (tensor.type === 'float16' && data instanceof Uint16Array) return halfToNumber(data[0]);
   return Number(data[0]);
+}
+
+/** One forward pass over token ids; the logit of the single output. */
+async function infer(ids: number[]): Promise<number> {
+  const n = ids.length;
+  const output = await session.run({
+    input_ids: new ort.Tensor('int64', BigInt64Array.from(ids, BigInt), [1, n]),
+    attention_mask: new ort.Tensor('int64', new BigInt64Array(n).fill(1n), [1, n]),
+  });
+  return firstValue(output.logits);
+}
+
+/** True when the browser offers a hardware WebGPU adapter. */
+async function hasGpu(): Promise<boolean> {
+  type Adapter = { info?: { isFallbackAdapter?: boolean }; isFallbackAdapter?: boolean };
+  const gpu = (navigator as { gpu?: { requestAdapter(): Promise<Adapter | null> } }).gpu;
+  const adapter = await gpu?.requestAdapter().catch(() => null);
+  // A fallback adapter is a software rasteriser: far slower than WebAssembly.
+  return !!adapter && !(adapter.info?.isFallbackAdapter ?? adapter.isFallbackAdapter);
+}
+
+/** Loads the runtime build of one backend and creates the session on it. */
+async function createSession(backend: Backend, bytes: Uint8Array, threads: number): Promise<void> {
+  if (backend === 'webgpu') {
+    ort = await import('onnxruntime-web/webgpu');
+    ort.env.wasm.wasmPaths = { mjs: gpuLoaderUrl, wasm: gpuBinaryUrl };
+  } else {
+    ort = await import('onnxruntime-web/wasm');
+    ort.env.wasm.wasmPaths = { mjs: wasmLoaderUrl, wasm: wasmBinaryUrl };
+  }
+  ort.env.wasm.numThreads = threads;
+  // ONNX Runtime's own messages (graph loading, optimisation) go to the console too.
+  ort.env.logLevel = 'info';
+  session = await ort.InferenceSession.create(bytes, {
+    executionProviders: [backend],
+    graphOptimizationLevel: 'all',
+    logSeverityLevel: 1,
+  });
+  if (backend === 'webgpu') {
+    // Compiles the shaders before the first real text, and proves the GPU path runs:
+    // a driver that fails here sends us to WebAssembly instead of failing on the user.
+    const logit = await infer(new Array<number>(MIN_TOKENS).fill(0));
+    if (!Number.isFinite(logit)) throw new Error(`warm-up returned ${logit}`);
+  }
+}
+
+/**
+ * WebGPU when the browser has a real adapter, WebAssembly otherwise. One backend
+ * at a time: given a list, the runtime falls back silently and does not say which
+ * provider it picked.
+ */
+async function createSessionOnBestBackend(bytes: Uint8Array, threads: number): Promise<Backend> {
+  if (await hasGpu()) {
+    try {
+      await createSession('webgpu', bytes, threads);
+      return 'webgpu';
+    } catch (error) {
+      log('webgpu: failed, falling back to wasm:', describe(error));
+    }
+  } else {
+    log('webgpu: no hardware adapter');
+  }
+  await createSession('wasm', bytes, threads);
+  return 'wasm';
 }
 
 async function score(id: number, text: string): Promise<void> {
@@ -131,22 +203,14 @@ async function score(id: number, text: string): Promise<void> {
 
   // The only special token is the leading <|endoftext|>, so plain truncation
   // matches what the Python tokenizer does with max_length=512.
-  const ids = all.slice(0, MAX_TOKENS);
-  const n = ids.length;
-  const feeds = {
-    input_ids: new ort.Tensor('int64', BigInt64Array.from(ids, BigInt), [1, n]),
-    attention_mask: new ort.Tensor('int64', new BigInt64Array(n).fill(1n), [1, n]),
-  };
-
   const started = performance.now();
-  const output = await session.run(feeds);
+  const logit = await infer(all.slice(0, MAX_TOKENS));
   const inferenceMs = performance.now() - started;
 
-  const logit = firstValue(output.logits);
   const value = 1 / (1 + Math.exp(-logit));
   log(
     `score #${id}: ${tokens} tokens${all.length > MAX_TOKENS ? ` (first ${limits.maxTokens} scored)` : ''},`,
-    `logit ${logit.toFixed(3)} (${output.logits.type}), score ${value.toFixed(3)},`,
+    `logit ${logit.toFixed(3)}, score ${value.toFixed(3)},`,
     `inference ${Math.round(inferenceMs)} ms`,
   );
 
@@ -155,15 +219,10 @@ async function score(id: number, text: string): Promise<void> {
 
 async function init(): Promise<void> {
   const threads = self.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 1, 8) : 1;
-  ort.env.wasm.numThreads = threads;
-  ort.env.wasm.wasmPaths = { mjs: ortLoaderUrl, wasm: ortWasmUrl };
-  // ONNX Runtime's own messages (graph loading, optimisation) go to the console too.
-  ort.env.logLevel = 'info';
   log(
     `start: crossOriginIsolated=${self.crossOriginIsolated},`,
     `hardwareConcurrency=${navigator.hardwareConcurrency}, threads=${threads}`,
   );
-  log('runtime files:', ortLoaderUrl, ortWasmUrl);
 
   const [bytes, tokenizerJson, tokenizerConfig, bands] = await Promise.all([
     loadModelBytes(),
@@ -178,17 +237,13 @@ async function init(): Promise<void> {
   specialTokens = tokenizer.encode('').ids.length;
   log(`tokenizer built (${specialTokens} special token per text); creating the inference session`);
   const sessionStart = performance.now();
-  session = await ort.InferenceSession.create(bytes, {
-    executionProviders: ['wasm'],
-    graphOptimizationLevel: 'all',
-    logSeverityLevel: 1,
-  });
+  const backend = await createSessionOnBestBackend(bytes, threads);
   log(
-    `session created in ${Math.round(performance.now() - sessionStart)} ms;`,
+    `session created on ${backend} in ${Math.round(performance.now() - sessionStart)} ms;`,
     `inputs ${session.inputNames.join(', ')}; outputs ${session.outputNames.join(', ')}`,
   );
 
-  post({ type: 'ready', bands, threads });
+  post({ type: 'ready', bands, backend, threads });
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));

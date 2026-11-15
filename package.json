@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "bench": "node bench/run.mjs"
   },
   "dependencies": {
     "@fontsource-variable/source-sans-3": "^5.3.1",
@@ -15,6 +16,7 @@
     "onnxruntime-web": "^1.31.1"
   },
   "devDependencies": {
+    "playwright-core": "^1.65.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
   }

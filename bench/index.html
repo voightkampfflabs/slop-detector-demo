@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>slop-detect bench</title>
+<p>Driven by <code>bench/run.mjs</code>; open the console to see the runtime's messages.</p>
+<script type="module">
+  // run.mjs calls this through page.evaluate, once per page.
+  window.bench = (cfg) =>
+    new Promise((resolve) => {
+      const worker = new Worker('/worker.js', { type: 'module' });
+      worker.onmessage = (event) => resolve(event.data);
+      worker.onerror = (event) => resolve({ error: event.message || 'worker failed to start' });
+      worker.postMessage(cfg);
+    });
+</script>

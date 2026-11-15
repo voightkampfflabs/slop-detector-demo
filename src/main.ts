@@ -230,8 +230,11 @@ function start(): void {
         ready = true;
         drawBands(message.bands);
         load.dataset.done = '';
+        // Which backend runs the model: it decides whether a text takes 0.1 s or seconds.
         status.textContent =
-          message.threads > 1 ? `ready · ${message.threads} threads` : 'ready · 1 thread';
+          message.backend === 'webgpu'
+            ? 'ready · GPU (WebGPU)'
+            : `ready · CPU (WebAssembly), ${message.threads} ${message.threads > 1 ? 'threads' : 'thread'}`;
         textarea.disabled = false;
         textarea.placeholder = 'Type or paste some English text.';
         textarea.focus();
