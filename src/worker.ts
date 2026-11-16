@@ -95,17 +95,18 @@ async function loadModelBytes(): Promise<Uint8Array> {
   const response = await fetch(MODEL_URL);
   if (!response.ok || !response.body) throw new Error(`model download: HTTP ${response.status}`);
   log(`model: HTTP ${response.status}, Content-Length ${response.headers.get('Content-Length')}`);
+  // The cache takes a second stream of the same download, so no second copy of the
+  // model sits in memory. A quota error only means the next visit downloads again.
+  const stored = cache?.put(MODEL_URL, response.clone()).then(
+    () => log('model: stored in cache'),
+    (error) => log('model: could not be cached:', describe(error)),
+  );
   const bytes = await readWithProgress(response, false);
   log(`model: ${bytes.length} bytes downloaded`);
 
-  // Not awaited: storing 441 MB should not delay the first score, and a quota
-  // error only means the next visit downloads again.
-  cache
-    ?.put(MODEL_URL, new Response(bytes.slice(), { headers: { 'Content-Length': String(bytes.length) } }))
-    .then(
-      () => log('model: stored in cache'),
-      (error) => log('model: could not be cached:', describe(error)),
-    );
+  // Awaited: whatever the cache write still buffers must be gone before the session
+  // is created, which is where memory peaks (mobile Safari kills the tab there).
+  await stored;
   return bytes;
 }
 
@@ -154,7 +155,8 @@ async function createSession(backend: Backend, bytes: Uint8Array, threads: numbe
     ort = await import('onnxruntime-web/wasm');
     ort.env.wasm.wasmPaths = { mjs: wasmLoaderUrl, wasm: wasmBinaryUrl };
   }
-  ort.env.wasm.numThreads = threads;
+  // The GPU does the work on WebGPU: one thread, so no shared memory or thread workers.
+  ort.env.wasm.numThreads = backend === 'webgpu' ? 1 : threads;
   // ONNX Runtime's own messages (graph loading, optimisation) go to the console too.
   ort.env.logLevel = 'info';
   session = await ort.InferenceSession.create(bytes, {
@@ -165,8 +167,15 @@ async function createSession(backend: Backend, bytes: Uint8Array, threads: numbe
   if (backend === 'webgpu') {
     // Compiles the shaders before the first real text, and proves the GPU path runs:
     // a driver that fails here sends us to WebAssembly instead of failing on the user.
-    const logit = await infer(new Array<number>(MIN_TOKENS).fill(0));
-    if (!Number.isFinite(logit)) throw new Error(`warm-up returned ${logit}`);
+    try {
+      const logit = await infer(new Array<number>(MIN_TOKENS).fill(0));
+      if (!Number.isFinite(logit)) throw new Error(`warm-up returned ${logit}`);
+    } catch (error) {
+      // Frees the model's copy in this runtime's heap and its GPU buffers. The
+      // WebAssembly fallback is a second runtime and loads the model again.
+      await session.release().catch(() => undefined);
+      throw error;
+    }
   }
 }
 
