@@ -15,16 +15,32 @@ import gpuBinaryUrl from './generated/ort-wasm-simd-threaded.asyncify.padded.was
 import type { Backend, Bands, FromWorker, ToWorker } from './protocol';
 import { modelInput } from './text';
 
-const REPO = 'https://huggingface.co/VoightKampffLabs/voi-slop-detect-380M/resolve/main';
+/** The exported model directory. VITE_REPO points a build at a local export before it is published. */
+const REPO: string =
+  import.meta.env.VITE_REPO ?? 'https://huggingface.co/VoightKampffLabs/voi-slop-detect-380M/resolve/main';
 const MODEL_URL = `${REPO}/onnx/model_quantized.onnx`;
-/** Size of model_quantized.onnx, used when the response carries no Content-Length. */
-const MODEL_BYTES = 450_063_595;
+/**
+ * The name the graph file gives its weights file, which sits next to it. The model is two
+ * files because the runtime parses a one-file model inside WebAssembly memory: 1 GB that
+ * is never returned, and more than a phone's tab can hold. Weights passed as external
+ * data go to the GPU without that copy.
+ */
+const WEIGHTS_NAME = 'model_quantized.onnx_data';
+const WEIGHTS_URL = `${REPO}/onnx/${WEIGHTS_NAME}`;
+/** Size of the weights file, used when the response carries no Content-Length. */
+const WEIGHTS_BYTES = 448_471_040;
 const MAX_TOKENS = 512;
 /** Shorter texts are outside what the model was trained on and are not scored. */
 const MIN_TOKENS = 30;
-/** Named after the export: the opset 18 graph of the old cache is wrong on WebGPU. */
-const CACHE_NAME = 'voi-slop-detect-380M-q8-opset23';
-const OLD_CACHES = ['voi-slop-detect-380M-q8'];
+/** Named after the export: the older caches hold a one-file model under the graph's URL. */
+const CACHE_NAME = 'voi-slop-detect-380M-q8-opset23-external';
+const OLD_CACHES = ['voi-slop-detect-380M-q8', 'voi-slop-detect-380M-q8-opset23'];
+
+/** The model as the runtime takes it: the graph, and the weights the graph refers to. */
+interface Model {
+  graph: Uint8Array<ArrayBuffer>;
+  weights: Uint8Array<ArrayBuffer>;
+}
 
 const post = (message: FromWorker) => self.postMessage(message);
 
@@ -91,7 +107,7 @@ async function fetchJson<T>(path: string): Promise<T> {
 
 /** Reads a response body into one buffer, reporting progress as it goes. */
 async function readWithProgress(response: Response, cached: boolean): Promise<Uint8Array<ArrayBuffer>> {
-  const total = Number(response.headers.get('Content-Length')) || MODEL_BYTES;
+  const total = Number(response.headers.get('Content-Length')) || WEIGHTS_BYTES;
   let buffer = new Uint8Array(total);
   let loaded = 0;
   let lastReport = 0;
@@ -119,39 +135,47 @@ async function readWithProgress(response: Response, cached: boolean): Promise<Ui
   return buffer.subarray(0, loaded);
 }
 
-/** Downloads the model, or reads it back from the Cache API on later visits. */
-async function loadModelBytes(): Promise<Uint8Array<ArrayBuffer>> {
+/** Downloads the graph and its weights, or reads them back from the Cache API on later visits. */
+async function loadModel(): Promise<Model> {
   // The Cache API can be missing or throw (private windows, blocked storage).
   const cache = await caches.open(CACHE_NAME).catch(() => null);
   for (const name of OLD_CACHES) void caches.delete(name).catch(() => false);
 
   log('cache storage', cache ? 'available' : 'unavailable');
 
-  const hit = await cache?.match(MODEL_URL).catch(() => undefined);
+  // One after the other: both report to the same progress bar, and the graph is 2 MB.
+  const graph = await loadFile(cache, 'graph', MODEL_URL);
+  const weights = await loadFile(cache, 'weights', WEIGHTS_URL);
+  return { graph, weights };
+}
+
+/** One file of the model, from the cache when it is there and from the network otherwise. */
+async function loadFile(cache: Cache | null, what: string, url: string): Promise<Uint8Array<ArrayBuffer>> {
+  const hit = await cache?.match(url).catch(() => undefined);
   if (hit?.body) {
-    log('model: reading from cache');
+    log(`${what}: reading from cache`);
     const bytes = await readWithProgress(hit, true);
-    log(`model: ${bytes.length} bytes from cache`);
+    log(`${what}: ${bytes.length} bytes from cache`);
     return bytes;
   }
 
-  log('model: downloading', MODEL_URL);
-  const response = await fetch(MODEL_URL);
-  if (!response.ok || !response.body) throw new Error(`model download: HTTP ${response.status}`);
-  log(`model: HTTP ${response.status}, Content-Length ${response.headers.get('Content-Length')}`);
+  log(`${what}: downloading`, url);
+  const response = await fetch(url);
+  if (!response.ok || !response.body) throw new Error(`${what} download: HTTP ${response.status}`);
+  log(`${what}: HTTP ${response.status}, Content-Length ${response.headers.get('Content-Length')}`);
   const bytes = await readWithProgress(response, false);
-  log(`model: ${bytes.length} bytes downloaded`);
+  log(`${what}: ${bytes.length} bytes downloaded`);
 
-  // Awaited: the cache write holds a second copy of the model, which must be gone
+  // Awaited: the cache write holds a second copy of the file, which must be gone
   // before the session is created, where memory peaks (mobile Safari kills the tab
   // there). From the buffer, not a stream of the download: Chrome fails Cache.put()
   // on a streamed body of this size. A quota error only means the next visit
   // downloads again.
   await cache
-    ?.put(MODEL_URL, new Response(bytes, { headers: { 'Content-Length': String(bytes.length) } }))
+    ?.put(url, new Response(bytes, { headers: { 'Content-Length': String(bytes.length) } }))
     .then(
-      () => log('model: stored in cache'),
-      (error) => log('model: could not be cached:', describe(error)),
+      () => log(`${what}: stored in cache`),
+      (error) => log(`${what}: could not be cached:`, describe(error)),
     );
   return bytes;
 }
@@ -193,7 +217,7 @@ async function hasGpu(): Promise<boolean> {
 }
 
 /** Loads the runtime build of one backend and creates the session on it. */
-async function createSession(backend: Backend, bytes: Uint8Array, threads: number): Promise<void> {
+async function createSession(backend: Backend, model: Model, threads: number): Promise<void> {
   if (backend === 'webgpu') {
     ort = await import('onnxruntime-web/webgpu');
     ort.env.wasm.wasmPaths = { mjs: gpuLoaderUrl, wasm: gpuBinaryUrl };
@@ -205,7 +229,8 @@ async function createSession(backend: Backend, bytes: Uint8Array, threads: numbe
   ort.env.wasm.numThreads = backend === 'webgpu' ? 1 : threads;
   // ONNX Runtime's own messages (graph loading, optimisation) go to the console too.
   ort.env.logLevel = 'info';
-  session = await ort.InferenceSession.create(bytes, {
+  session = await ort.InferenceSession.create(model.graph, {
+    externalData: [{ path: WEIGHTS_NAME, data: model.weights }],
     executionProviders: [backend],
     graphOptimizationLevel: 'all',
     logSeverityLevel: 1,
@@ -230,13 +255,13 @@ async function createSession(backend: Backend, bytes: Uint8Array, threads: numbe
  * at a time: given a list, the runtime falls back silently and does not say which
  * provider it picked.
  */
-async function createSessionOnBestBackend(bytes: Uint8Array, threads: number): Promise<Backend> {
+async function createSessionOnBestBackend(model: Model, threads: number): Promise<Backend> {
   const forced = options.get('backend');
   if (forced === 'wasm') {
     log('webgpu: skipped, ?backend=wasm');
   } else if (await hasGpu()) {
     try {
-      await createSession('webgpu', bytes, threads);
+      await createSession('webgpu', model, threads);
       return 'webgpu';
     } catch (error) {
       if (forced === 'webgpu') throw error;
@@ -245,7 +270,7 @@ async function createSessionOnBestBackend(bytes: Uint8Array, threads: number): P
   } else {
     log('webgpu: no hardware adapter');
   }
-  await createSession('wasm', bytes, threads);
+  await createSession('wasm', model, threads);
   return 'wasm';
 }
 
@@ -285,8 +310,8 @@ async function init(): Promise<void> {
     `navigator.gpu=${'gpu' in navigator}`,
   );
 
-  const [bytes, tokenizerJson, tokenizerConfig, bands] = await Promise.all([
-    loadModelBytes(),
+  const [model, tokenizerJson, tokenizerConfig, bands] = await Promise.all([
+    loadModel(),
     fetchJson<object>('tokenizer.json'),
     fetchJson<object>('tokenizer_config.json'),
     fetchJson<Bands>('bands.json'),
@@ -298,7 +323,7 @@ async function init(): Promise<void> {
   specialTokens = tokenizer.encode('').ids.length;
   log(`tokenizer built (${specialTokens} special token per text); creating the inference session`);
   const sessionStart = performance.now();
-  const backend = await createSessionOnBestBackend(bytes, threads);
+  const backend = await createSessionOnBestBackend(model, threads);
   log(
     `session created on ${backend} in ${Math.round(performance.now() - sessionStart)} ms;`,
     `inputs ${session.inputNames.join(', ')}; outputs ${session.outputNames.join(', ')}`,
