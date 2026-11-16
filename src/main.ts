@@ -112,26 +112,51 @@ function showError(message: string): void {
   delete gauge.dataset.busy;
 }
 
+/** The trace of the load in progress, kept where it survives the browser killing the tab. */
+const TRACE_KEY = 'slop-trace';
+/** Set while the session is being created: still set on the next visit if the tab died there. */
+const PREPARING_KEY = 'slop-preparing';
+
+function stored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null; // Blocked storage.
+  }
+}
+
+function store(key: string, value: string | null): void {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    // Blocked or full storage: the trace is only kept in memory.
+  }
+}
+
 /** The worker's trace, newest last. */
 const trace: string[] = [];
+/** Off once the model is ready: only a load that dies needs its trace on the next visit. */
+let keepTrace = true;
 
 function note(line: string): void {
   trace.push(line);
   if (trace.length > 400) trace.shift();
+  if (keepTrace) store(TRACE_KEY, trace.join('\n'));
 }
 
-/** Puts the trace into the text field, where it can be read and copied on a phone. */
-function showTrace(): void {
+/** Puts a trace into the text field, where it can be read and copied on a phone. */
+function showTrace(lines: string[] = trace): void {
   const page = [
     navigator.userAgent,
     `crossOriginIsolated=${crossOriginIsolated}, service worker ` +
       `${navigator.serviceWorker?.controller ? 'in control' : 'not in control'}, ` +
       `navigator.gpu=${'gpu' in navigator}`,
   ];
-  const lines = trace.length ? trace : ['(the worker sent nothing: its script did not start)'];
+  const shown = lines.length ? lines : ['(the worker sent nothing: its script did not start)'];
   textarea.disabled = false;
   textarea.readOnly = true;
-  textarea.value = [...page, '', ...lines].join('\n');
+  textarea.value = [...page, '', ...shown].join('\n');
   textarea.scrollTop = textarea.scrollHeight;
 }
 
@@ -201,7 +226,24 @@ function renderResult(result: ScoreResult): void {
 // --- Scoring loop ----------------------------------------------------------
 
 function start(): void {
-  const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+  if (stored(PREPARING_KEY)) {
+    // The last visit ended while the session was being created, most likely because
+    // the browser killed the tab for its memory. Show that trace instead of dying again.
+    const last = stored(TRACE_KEY)?.split('\n') ?? [];
+    store(PREPARING_KEY, null);
+    store(TRACE_KEY, null);
+    status.dataset.error = '';
+    status.textContent = 'the last load did not finish · reload to try again';
+    showTrace(last);
+    return;
+  }
+  store(TRACE_KEY, null);
+
+  // The query string travels as the worker's name: see `options` in worker.ts.
+  const worker = new Worker(new URL('./worker.ts', import.meta.url), {
+    type: 'module',
+    name: location.search,
+  });
   const send = (message: ToWorker) => worker.postMessage(message);
 
   let ready = false;
@@ -247,6 +289,7 @@ function start(): void {
 
       case 'compiling':
         status.textContent = 'preparing the model';
+        store(PREPARING_KEY, '1');
         break;
 
       case 'log':
@@ -255,6 +298,9 @@ function start(): void {
 
       case 'ready':
         ready = true;
+        keepTrace = false;
+        store(PREPARING_KEY, null);
+        store(TRACE_KEY, null);
         drawBands(message.bands);
         load.dataset.done = '';
         // Which backend runs the model: it decides whether a text takes 0.1 s or seconds.
@@ -288,6 +334,7 @@ function start(): void {
         waiting = null;
         showError(message.message);
         note(`error: ${message.message}`);
+        store(PREPARING_KEY, null);
         if (!ready) showTrace();
         break;
     }
@@ -300,6 +347,7 @@ function start(): void {
       `worker error event: message "${event.message ?? ''}", ` +
         `at ${event.filename ?? '?'}:${event.lineno ?? '?'}`,
     );
+    store(PREPARING_KEY, null);
     showError(event.message || 'the worker crashed');
     showTrace();
   };

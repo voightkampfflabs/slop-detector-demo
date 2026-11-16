@@ -26,6 +26,12 @@ const OLD_CACHES = ['voi-slop-detect-380M-q8'];
 
 const post = (message: FromWorker) => self.postMessage(message);
 
+/**
+ * The page's query string, which it passes as the worker's name. For testing a device:
+ * ?backend=wasm or ?backend=webgpu runs that backend only, ?threads=2 caps the threads.
+ */
+const options = new URLSearchParams(self.name);
+
 const t0 = performance.now();
 const seconds = () => `${((performance.now() - t0) / 1000).toFixed(2)}s`;
 
@@ -45,13 +51,15 @@ function trace(args: unknown[]): void {
 }
 
 /** Trace of every loading and scoring step, with seconds since start. */
+const consoleLog = console.log.bind(console);
 function log(...args: unknown[]): void {
-  console.log(`[slop ${seconds()}]`, ...args);
+  consoleLog(`[slop ${seconds()}]`, ...args);
   trace(args);
 }
 
-// ONNX Runtime reports its warnings and errors on the console: trace those too.
-for (const level of ['warn', 'error'] as const) {
+// ONNX Runtime reports its own progress and errors on the console: trace those too.
+// Its last line before the tab dies says how far session creation got.
+for (const level of ['log', 'info', 'warn', 'error'] as const) {
   const original = console[level].bind(console);
   console[level] = (...args: unknown[]) => {
     original(...args);
@@ -219,11 +227,15 @@ async function createSession(backend: Backend, bytes: Uint8Array, threads: numbe
  * provider it picked.
  */
 async function createSessionOnBestBackend(bytes: Uint8Array, threads: number): Promise<Backend> {
-  if (await hasGpu()) {
+  const forced = options.get('backend');
+  if (forced === 'wasm') {
+    log('webgpu: skipped, ?backend=wasm');
+  } else if (await hasGpu()) {
     try {
       await createSession('webgpu', bytes, threads);
       return 'webgpu';
     } catch (error) {
+      if (forced === 'webgpu') throw error;
       log('webgpu: failed, falling back to wasm:', describe(error));
     }
   } else {
@@ -261,7 +273,8 @@ async function score(id: number, text: string): Promise<void> {
 }
 
 async function init(): Promise<void> {
-  const threads = self.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 1, 8) : 1;
+  const wanted = Number(options.get('threads')) || 8;
+  const threads = self.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 1, wanted) : 1;
   log(
     `start: crossOriginIsolated=${self.crossOriginIsolated},`,
     `hardwareConcurrency=${navigator.hardwareConcurrency}, threads=${threads},`,
