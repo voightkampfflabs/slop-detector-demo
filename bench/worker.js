@@ -18,10 +18,10 @@ function halfToNumber(half) {
   return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
 }
 
-/** First value of a float tensor; float16 can arrive as raw bits in a Uint16Array. */
-function firstValue(tensor) {
-  if (tensor.type === 'float16' && tensor.data instanceof Uint16Array) return halfToNumber(tensor.data[0]);
-  return Number(tensor.data[0]);
+/** The values of a float tensor; float16 can arrive as raw bits in a Uint16Array. */
+function values(tensor) {
+  if (tensor.type === 'float16' && tensor.data instanceof Uint16Array) return Array.from(tensor.data, halfToNumber);
+  return Array.from(tensor.data, Number);
 }
 
 async function adapterInfo() {
@@ -63,31 +63,52 @@ async function run(cfg) {
   });
   const loadMs = performance.now() - loadStart;
 
-  const lens = [];
-  for (const ids of cfg.inputs) {
-    const n = ids.length;
-    const once = async () => {
-      // Tensors are built inside the timed region on purpose: the page pays for them too.
-      const started = performance.now();
-      const output = await session.run({
-        input_ids: new ort.Tensor('int64', BigInt64Array.from(ids, BigInt), [1, n]),
-        attention_mask: new ort.Tensor('int64', new BigInt64Array(n).fill(1n), [1, n]),
-      });
-      const logit = firstValue(output.logits);
-      return { ms: performance.now() - started, logit };
-    };
+  /** One forward pass over a batch: rows shorter than the longest are padded and masked. */
+  const once = async (rows) => {
+    // Tensors are built inside the timed region on purpose: the page pays for them too.
+    const started = performance.now();
+    const n = Math.max(...rows.map((row) => row.length));
+    const ids = new BigInt64Array(rows.length * n).fill(BigInt(cfg.pad));
+    const mask = new BigInt64Array(rows.length * n);
+    rows.forEach((row, r) => {
+      ids.set(BigInt64Array.from(row, BigInt), r * n);
+      mask.fill(1n, r * n, r * n + row.length);
+    });
+    const output = await session.run({
+      input_ids: new ort.Tensor('int64', ids, [rows.length, n]),
+      attention_mask: new ort.Tensor('int64', mask, [rows.length, n]),
+    });
+    const logits = values(output.logits);
+    return { ms: performance.now() - started, logits };
+  };
 
-    const first = await once(); // includes shader compilation and first-touch allocation
-    const ms = [];
-    let logit = first.logit;
-    for (let i = 0; i < cfg.runs; i++) {
-      const result = await once();
-      ms.push(result.ms);
-      logit = result.logit;
+  const cases = [];
+  for (const rows of cfg.inputs) {
+    // Each distinct row alone, to compare with its logit inside the batch. Not timed.
+    const alone = new Map();
+    if (rows.length > 1) {
+      for (const row of rows) if (!alone.has(row.length)) alone.set(row.length, (await once([row])).logits[0]);
     }
-    lens.push({ len: n, firstMs: first.ms, ms, logit });
+
+    const first = await once(rows); // includes shader compilation and first-touch allocation
+    const ms = [];
+    let logits = first.logits;
+    for (let i = 0; i < cfg.runs; i++) {
+      const result = await once(rows);
+      ms.push(result.ms);
+      logits = result.logits;
+    }
+    cases.push({
+      len: rows[0].length,
+      batch: rows.length,
+      firstMs: first.ms,
+      ms,
+      logit: logits[0],
+      // How far each row's logit in the batch is from the same row alone: the largest difference.
+      batchDelta: rows.length > 1 ? Math.max(...rows.map((row, r) => Math.abs(logits[r] - alone.get(row.length)))) : null,
+    });
   }
 
   await session.release();
-  return { env, loadMs, lens };
+  return { env, loadMs, cases };
 }

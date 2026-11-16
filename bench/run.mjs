@@ -32,6 +32,9 @@ const { values: args } = parseArgs({
     // window, 3 runs. Widen with e.g. --threads 1,4,8 --lens 128,512 --runs 10.
     threads: { type: 'string', default: String(Math.min(os.availableParallelism(), 8)) }, // wasm rows; webgpu uses the last value
     lens: { type: 'string', default: '512' },
+    // Texts per forward pass. Above 1, the first row is the text at full length and the others
+    // are the text at half length, padded: what a page of mixed comments costs.
+    batch: { type: 'string', default: '1' },
     runs: { type: 'string', default: '3' },
     ref: { type: 'string', default: 'model' }, // logits are compared with this model's
     build: { type: 'string' }, // onnxruntime-web build (wasm, webgpu, jspi, all); default per backend
@@ -72,14 +75,17 @@ async function ensureFiles() {
   }
 }
 
-/** Token ids of the benchmark text, cut to each requested length. */
-function inputs(lens) {
+/** Token ids of the benchmark text: one batch per requested length and batch size, and the padding id. */
+function inputs(lens, batches) {
   const read = (name) => JSON.parse(readFileSync(path.join(MODELS, name), 'utf8'));
   const tokenizer = new Tokenizer(read('tokenizer.json'), read('tokenizer_config.json'));
   const ids = tokenizer.encode(readFileSync(args.text, 'utf8')).ids;
   const longest = Math.max(...lens);
   if (ids.length < longest) throw new Error(`${args.text} has ${ids.length} tokens, --lens asks for ${longest}`);
-  return lens.map((len) => ids.slice(0, len));
+  const batchesOf = (len) =>
+    batches.map((batch) => [ids.slice(0, len), ...Array(batch - 1).fill(ids.slice(0, len >> 1))]);
+  // The tokenizer pads with <|endoftext|>, the token it also puts in front of every text.
+  return { pad: ids[0], batches: lens.flatMap(batchesOf) };
 }
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm' };
@@ -151,17 +157,21 @@ function report(rows, ref) {
   for (const row of rows) {
     if (row.model === ref && row.logit != null && !reference.has(row.len)) reference.set(row.len, row.logit);
   }
-  const head = ['model', 'backend', 'threads', 'tokens', 'load s', 'first ms', 'median ms', 'p90 ms', 'min ms', 'logit', `Δ vs ${ref}`];
+  const head = [
+    'model', 'backend', 'threads', 'tokens', 'batch', 'load s', 'first ms', 'median ms', 'ms per text', 'p90 ms', 'min ms',
+    'logit', `Δ vs ${ref}`, 'max Δ in batch',
+  ];
   const lines = [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`];
   for (const row of rows) {
     if (row.error) {
-      lines.push(`| ${row.model} | ${row.ep} | ${row.threads} | | | | | | | | ${row.error.split('\n')[0].slice(0, 120)} |`);
+      lines.push(`| ${row.model} | ${row.ep} | ${row.threads} | | | | | | | | | | | ${row.error.split('\n')[0].slice(0, 120)} |`);
       continue;
     }
     const delta = reference.has(row.len) ? (row.logit - reference.get(row.len)).toFixed(3) : '';
     lines.push(
-      `| ${row.model} | ${row.ep} | ${row.threads} | ${row.len} | ${(row.loadMs / 1000).toFixed(1)} | ${row.firstMs.toFixed(0)} | ` +
-        `${row.median.toFixed(0)} | ${row.p90.toFixed(0)} | ${row.min.toFixed(0)} | ${row.logit.toFixed(3)} | ${delta} |`,
+      `| ${row.model} | ${row.ep} | ${row.threads} | ${row.len} | ${row.batch} | ${(row.loadMs / 1000).toFixed(1)} | ` +
+        `${row.firstMs.toFixed(0)} | ${row.median.toFixed(0)} | ${(row.median / row.batch).toFixed(0)} | ${row.p90.toFixed(0)} | ` +
+        `${row.min.toFixed(0)} | ${row.logit.toFixed(3)} | ${delta} | ${row.batchDelta?.toFixed(3) ?? ''} |`,
     );
   }
   return lines.join('\n');
@@ -180,7 +190,7 @@ if (!models.length || missing.length) {
 }
 
 const threads = numbers(args.threads);
-const cfgInputs = inputs(numbers(args.lens));
+const cfgInputs = inputs(numbers(args.lens), numbers(args.batch));
 const sessionOptions = JSON.parse(args['session-options']);
 const server = await serve();
 const origin = `http://127.0.0.1:${server.address().port}`;
@@ -201,7 +211,8 @@ for (const model of models) {
         build: args.build ?? (ep === 'wasm' ? 'wasm' : 'webgpu'),
         threads: count,
         runs: Number(args.runs),
-        inputs: cfgInputs,
+        inputs: cfgInputs.batches,
+        pad: cfgInputs.pad,
         sessionOptions,
         verbose: args.verbose,
       }, log);
@@ -212,13 +223,13 @@ for (const model of models) {
       }
       // wasm rows carry no adapter; keep the one a webgpu row reported
       environment = { ...environment, ...result.env, browser: result.browser, adapter: result.env.adapter ?? environment.adapter ?? null };
-      for (const { len, firstMs, ms, logit } of result.lens) {
+      for (const { len, batch, firstMs, ms, logit, batchDelta } of result.cases) {
         const sorted = [...ms].sort((a, b) => a - b);
         rows.push({
-          model, ep, threads: count, len, loadMs: result.loadMs, firstMs, ms, logit,
+          model, ep, threads: count, len, batch, loadMs: result.loadMs, firstMs, ms, logit, batchDelta,
           median: quantile(sorted, 0.5), p90: quantile(sorted, 0.9), min: sorted[0],
         });
-        console.error(`  ${len} tokens: ${quantile(sorted, 0.5).toFixed(0)} ms, logit ${logit.toFixed(3)}`);
+        console.error(`  ${len} tokens x ${batch}: ${quantile(sorted, 0.5).toFixed(0)} ms, logit ${logit.toFixed(3)}`);
       }
     }
   }
