@@ -112,6 +112,29 @@ function showError(message: string): void {
   delete gauge.dataset.busy;
 }
 
+/** The worker's trace, newest last. */
+const trace: string[] = [];
+
+function note(line: string): void {
+  trace.push(line);
+  if (trace.length > 400) trace.shift();
+}
+
+/** Puts the trace into the text field, where it can be read and copied on a phone. */
+function showTrace(): void {
+  const page = [
+    navigator.userAgent,
+    `crossOriginIsolated=${crossOriginIsolated}, service worker ` +
+      `${navigator.serviceWorker?.controller ? 'in control' : 'not in control'}, ` +
+      `navigator.gpu=${'gpu' in navigator}`,
+  ];
+  const lines = trace.length ? trace : ['(the worker sent nothing: its script did not start)'];
+  textarea.disabled = false;
+  textarea.readOnly = true;
+  textarea.value = [...page, '', ...lines].join('\n');
+  textarea.scrollTop = textarea.scrollHeight;
+}
+
 const DASH = '–';
 
 /** Empties the score side of the gauge; the stats are set by the caller. */
@@ -226,6 +249,10 @@ function start(): void {
         status.textContent = 'preparing the model';
         break;
 
+      case 'log':
+        note(message.line);
+        break;
+
       case 'ready':
         ready = true;
         drawBands(message.bands);
@@ -260,12 +287,22 @@ function start(): void {
         inFlight = null;
         waiting = null;
         showError(message.message);
-        if (!ready) textarea.placeholder = 'The model could not be loaded.';
+        note(`error: ${message.message}`);
+        if (!ready) showTrace();
         break;
     }
   };
 
-  worker.onerror = (event) => showError(event.message || 'the worker crashed');
+  // An error nobody caught, in the worker or in one of the runtime's thread workers.
+  // The worker does not recover from it, so the trace replaces the text.
+  worker.onerror = (event) => {
+    note(
+      `worker error event: message "${event.message ?? ''}", ` +
+        `at ${event.filename ?? '?'}:${event.lineno ?? '?'}`,
+    );
+    showError(event.message || 'the worker crashed');
+    showTrace();
+  };
   textarea.addEventListener('input', onInput);
 }
 

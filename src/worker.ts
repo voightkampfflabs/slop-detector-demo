@@ -27,10 +27,44 @@ const OLD_CACHES = ['voi-slop-detect-380M-q8'];
 const post = (message: FromWorker) => self.postMessage(message);
 
 const t0 = performance.now();
-/** Console trace of every loading and scoring step, with seconds since start. */
-function log(...args: unknown[]): void {
-  console.log(`[slop ${((performance.now() - t0) / 1000).toFixed(2)}s]`, ...args);
+const seconds = () => `${((performance.now() - t0) / 1000).toFixed(2)}s`;
+
+function printable(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value instanceof Error) return value.stack || value.message;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
+
+/** Sends one trace line to the page: a phone has no console to read. */
+function trace(args: unknown[]): void {
+  post({ type: 'log', line: `${seconds()} ${args.map(printable).join(' ')}` });
+}
+
+/** Trace of every loading and scoring step, with seconds since start. */
+function log(...args: unknown[]): void {
+  console.log(`[slop ${seconds()}]`, ...args);
+  trace(args);
+}
+
+// ONNX Runtime reports its warnings and errors on the console: trace those too.
+for (const level of ['warn', 'error'] as const) {
+  const original = console[level].bind(console);
+  console[level] = (...args: unknown[]) => {
+    original(...args);
+    trace([`console.${level}:`, ...args]);
+  };
+}
+
+self.addEventListener('error', (event) =>
+  trace(['uncaught error:', event.message, `at ${event.filename}:${event.lineno}`]),
+);
+self.addEventListener('unhandledrejection', (event) =>
+  trace(['unhandled rejection:', event.reason]),
+);
 
 let tokenizer: Tokenizer;
 /** The runtime build of the backend in use; the two builds are loaded on demand. */
@@ -230,7 +264,8 @@ async function init(): Promise<void> {
   const threads = self.crossOriginIsolated ? Math.min(navigator.hardwareConcurrency || 1, 8) : 1;
   log(
     `start: crossOriginIsolated=${self.crossOriginIsolated},`,
-    `hardwareConcurrency=${navigator.hardwareConcurrency}, threads=${threads}`,
+    `hardwareConcurrency=${navigator.hardwareConcurrency}, threads=${threads},`,
+    `navigator.gpu=${'gpu' in navigator}`,
   );
 
   const [bytes, tokenizerJson, tokenizerConfig, bands] = await Promise.all([

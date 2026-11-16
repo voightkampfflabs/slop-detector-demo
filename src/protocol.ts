@@ -29,6 +29,8 @@ export type Backend = 'webgpu' | 'wasm';
 export type FromWorker =
   | { type: 'progress'; loaded: number; total: number; cached: boolean }
   | { type: 'compiling' }
+  /** One line of the worker's trace. The page shows the trace when loading fails. */
+  | { type: 'log'; line: string }
   | { type: 'ready'; bands: Bands; backend: Backend; threads: number }
   | { type: 'result'; id: number; result: ScoreResult }
   | { type: 'error'; message: string };
