@@ -3,6 +3,10 @@ import '@fontsource-variable/source-serif-4/wght-italic.css';
 import '@fontsource-variable/source-sans-3/wght.css';
 import './style.css';
 import type { Bands, FromWorker, ScoreResult, ToWorker } from './protocol';
+import workerUrl from './worker.ts?worker&url';
+
+/** The commit this page was built from, to tell a stale page from the current one. */
+const BUILD = String(import.meta.env.VITE_BUILD ?? 'local').slice(0, 7);
 
 /** Pause after the last keystroke before the text is sent to the model. */
 const DEBOUNCE_MS = 250;
@@ -148,6 +152,7 @@ function note(line: string): void {
 /** Puts a trace into the text field, where it can be read and copied on a phone. */
 function showTrace(lines: string[] = trace): void {
   const page = [
+    `build ${BUILD}, ${location.search || 'no options'}`,
     navigator.userAgent,
     `crossOriginIsolated=${crossOriginIsolated}, service worker ` +
       `${navigator.serviceWorker?.controller ? 'in control' : 'not in control'}, ` +
@@ -240,10 +245,9 @@ function start(): void {
   store(TRACE_KEY, null);
 
   // The query string travels as the worker's name: see `options` in worker.ts.
-  const worker = new Worker(new URL('./worker.ts', import.meta.url), {
-    type: 'module',
-    name: location.search,
-  });
+  const worker = new Worker(workerUrl, { type: 'module', name: location.search });
+  /** False until the worker's first message: until then its script may not have loaded. */
+  let heard = false;
   const send = (message: ToWorker) => worker.postMessage(message);
 
   let ready = false;
@@ -282,6 +286,7 @@ function start(): void {
 
   worker.onmessage = (event: MessageEvent<FromWorker>) => {
     const message = event.data;
+    heard = true;
     switch (message.type) {
       case 'progress':
         showProgress(message.loaded, message.total, message.cached);
@@ -350,7 +355,21 @@ function start(): void {
     store(PREPARING_KEY, null);
     showError(event.message || 'the worker crashed');
     showTrace();
+    if (!heard) void explainSilentWorker();
   };
+
+  /**
+   * The worker failed before its first message, so its script may not have loaded.
+   * After a deploy, a cached copy of this page asks for a worker file that is gone.
+   */
+  async function explainSilentWorker(): Promise<void> {
+    const response = await fetch(workerUrl, { cache: 'no-store' }).catch(() => null);
+    note(`worker script ${workerUrl}: ${response ? `HTTP ${response.status}` : 'could not be fetched'}`);
+    if (response?.status === 404) {
+      status.textContent = 'this page is out of date · reload it';
+    }
+    showTrace();
+  }
   textarea.addEventListener('input', onInput);
 }
 
