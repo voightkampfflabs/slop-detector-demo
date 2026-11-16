@@ -6,10 +6,12 @@ import { Tokenizer } from '@huggingface/tokenizers';
 // load this file they run init() again and replace the runtime's message
 // handler, and session creation never returns. The WebGPU build of the runtime
 // has its own pair (asyncify); the plain pair is half the size and CPU only.
+// The asyncify binary is the copy scripts/pad-wasm.mjs writes: Safari's compiler
+// runs out of memory on the original.
 import wasmLoaderUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url';
 import wasmBinaryUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url';
 import gpuLoaderUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.mjs?url';
-import gpuBinaryUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url';
+import gpuBinaryUrl from './generated/ort-wasm-simd-threaded.asyncify.padded.wasm?url';
 import type { Backend, Bands, FromWorker, ToWorker } from './protocol';
 import { modelInput } from './text';
 
@@ -88,7 +90,7 @@ async function fetchJson<T>(path: string): Promise<T> {
 }
 
 /** Reads a response body into one buffer, reporting progress as it goes. */
-async function readWithProgress(response: Response, cached: boolean): Promise<Uint8Array> {
+async function readWithProgress(response: Response, cached: boolean): Promise<Uint8Array<ArrayBuffer>> {
   const total = Number(response.headers.get('Content-Length')) || MODEL_BYTES;
   let buffer = new Uint8Array(total);
   let loaded = 0;
@@ -118,7 +120,7 @@ async function readWithProgress(response: Response, cached: boolean): Promise<Ui
 }
 
 /** Downloads the model, or reads it back from the Cache API on later visits. */
-async function loadModelBytes(): Promise<Uint8Array> {
+async function loadModelBytes(): Promise<Uint8Array<ArrayBuffer>> {
   // The Cache API can be missing or throw (private windows, blocked storage).
   const cache = await caches.open(CACHE_NAME).catch(() => null);
   for (const name of OLD_CACHES) void caches.delete(name).catch(() => false);
@@ -137,18 +139,20 @@ async function loadModelBytes(): Promise<Uint8Array> {
   const response = await fetch(MODEL_URL);
   if (!response.ok || !response.body) throw new Error(`model download: HTTP ${response.status}`);
   log(`model: HTTP ${response.status}, Content-Length ${response.headers.get('Content-Length')}`);
-  // The cache takes a second stream of the same download, so no second copy of the
-  // model sits in memory. A quota error only means the next visit downloads again.
-  const stored = cache?.put(MODEL_URL, response.clone()).then(
-    () => log('model: stored in cache'),
-    (error) => log('model: could not be cached:', describe(error)),
-  );
   const bytes = await readWithProgress(response, false);
   log(`model: ${bytes.length} bytes downloaded`);
 
-  // Awaited: whatever the cache write still buffers must be gone before the session
-  // is created, which is where memory peaks (mobile Safari kills the tab there).
-  await stored;
+  // Awaited: the cache write holds a second copy of the model, which must be gone
+  // before the session is created, where memory peaks (mobile Safari kills the tab
+  // there). From the buffer, not a stream of the download: Chrome fails Cache.put()
+  // on a streamed body of this size. A quota error only means the next visit
+  // downloads again.
+  await cache
+    ?.put(MODEL_URL, new Response(bytes, { headers: { 'Content-Length': String(bytes.length) } }))
+    .then(
+      () => log('model: stored in cache'),
+      (error) => log('model: could not be cached:', describe(error)),
+    );
   return bytes;
 }
 

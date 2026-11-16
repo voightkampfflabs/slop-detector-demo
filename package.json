@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "pad-wasm": "node scripts/pad-wasm.mjs",
+    "dev": "npm run pad-wasm && vite",
+    "build": "npm run pad-wasm && tsc --noEmit && vite build",
     "preview": "vite preview",
     "bench": "node bench/run.mjs"
   },
